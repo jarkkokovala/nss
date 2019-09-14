@@ -56,6 +56,8 @@ def main():
 
                     xor = bytes(x ^ y for x, y in zip(data, data2))
                     try_send(s, xor)
+                else:
+                    break
     
             data = f.read(PAYLOAD_SIZE)
 
