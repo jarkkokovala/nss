@@ -5,27 +5,37 @@ import socket
 import pickle
 import time
 import threading
+import urllib
+import http.client
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 
-fronts = [ ]
-for front in settings.FRONTS:
-    fronts.append({ "address" : front, "pingcount" : 0})
+fronts = settings.INITIAL_FRONTS
+for id in fronts:
+    fronts[id]["pingcount"] = 0
+    fronts[id]["failed"] = False
 fronts_lock = threading.Lock()
 
-def fail_front(front):
-    print("Front", front["address"], "failed")
-    with fronts_lock:
-        fronts.remove(front)
+players = settings.INITIAL_PLAYERS
+players_lock = threading.Lock()
+
+# Caller must have fronts_lock
+def fail_front(id):
+    print("Front", id, "failed")
+
+    fronts[id]["failed"] = True
 
 def front_pinger(s):
     while True:
-        for front in fronts:
-            if front["pingcount"] > 4:
-                    fail_front(front)
-            s.sendto(b"PING", front["address"])
+        with fronts_lock:
+            for id in fronts:
+                front = fronts[id]
 
-            with fronts_lock:
+                if not front["failed"] and front["pingcount"] > 4:
+                    fail_front(id)
+
+                s.sendto(b"PING", front["address"])
+
                 front["pingcount"] += 1
         time.sleep(1)
 
@@ -33,33 +43,72 @@ def front_pong_listener(s):
     while True:
         data, addr = s.recvfrom(1024)
         if data == b"PONG":
-            for front in fronts:
-                if front["address"] == addr:
-                    with fronts_lock:
+            with fronts_lock:
+                for id in fronts:
+                    front = fronts[id]
+
+                    if front["address"] == addr:
                         front["pingcount"] = 0
 
-class quorum_http_handler(BaseHTTPRequestHandler):
-    def do_GET(self):
+                        if front["failed"]:
+                            front["failed"] = True
+                            print("Front", id, "back alive")
 
-        print("HTTP GET", self.path)
+# caller must have fronts_lock and players_lock
+def request_front_for_player(front, player):
+    if not front["failed"]:
+        addrport = front["address"]
+
+        front_conn = http.client.HTTPConnection(addrport[0], addrport[1])
+        try:
+            print(player)
+            front_conn.request("POST", "/player", pickle.dumps(player))
+
+            response = front_conn.getresponse()
+            front_conn.close()
+
+            if response.status == 200:
+                return True
+        except OSError:
+            pass
+
+    return False
+
+class quorum_http_handler(BaseHTTPRequestHandler):
+    def do_POST(self):
+        protocol_version = "HTTP/1.1"
+
         query = urlparse(self.path)
-        vars = urllib.parse.parse_qs(query)
+        content_len = int(self.headers.get('Content-Length'))
+        if content_len > 0:
+            body = self.rfile.read(content_len)
 
         if query.path == "/front":
-            self.send_response(200)
-            self.send_header("Content-type: application/octet-stream")
-            self.end_headers
-            self.wfile.write(pickle.dumps(fronts[0]["address"]))
-            return
-        else:
-            self.send_response(404)
-            self.send_header("Content-type", "text/plain")
-            self.end_headers
-            self.wfile.write(b"404 not found\n")
-            return
+            client = pickle.loads(body)
 
-def front_http_server():
+            with fronts_lock, players_lock:
+                player = players[client["id"]]
+                player["addr"] = client["addr"]
+                player["session"] = client["session"]
+
+                front = fronts[player["front"]]
+
+                if request_front_for_player(front, { client["id"]: player } ):
+                    print("Giving front", front, "to", player["name"], "at", client["addr"])
+
+                    self.send_response(200)
+                    self.end_headers()
+                    self.wfile.write(pickle.dumps(front["address"]))
+                else:
+                    self.send_error(503)
+                    self.end_headers()
+        else:
+            self.send_error(404)
+            self.end_headers()
+
+def quorum_http_server():
     httpd = HTTPServer(settings.QUORUM_ADDRPORT, quorum_http_handler)
+
     try:
         print("Starting HTTP server at", settings.QUORUM_ADDRPORT)
         httpd.serve_forever()
@@ -69,8 +118,8 @@ def front_http_server():
     httpd.server_close()
 
 def main():
-    front_http_server_thread = threading.Thread(target=front_http_server)
-    front_http_server_thread.start()
+    quorum_http_server_thread = threading.Thread(target=quorum_http_server)
+    quorum_http_server_thread.start()
 
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.bind(settings.QUORUM_ADDRPORT)
@@ -84,7 +133,7 @@ def main():
         front_pinger_thread.join()
         front_pong_listener_thread.join()
 
-    front_http_server_thread.join()
+    quorum_http_server_thread.join()
 
 if __name__ == "__main__":
     main()

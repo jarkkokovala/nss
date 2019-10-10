@@ -5,7 +5,6 @@ import socket
 import pickle
 import threading
 import http.client
-from urllib.parse import urlencode
 
 def main():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
@@ -14,21 +13,23 @@ def main():
         while True:
             data, addr = s.recvfrom(1024)
 
-            if data[:5] == "FRONT":
-                client = pickle.loads(data[5:])
+            if data[:6] == b"FRONT?":
+                client = pickle.loads(data[6:])
                 client["addr"] = addr
 
-                while True:
-                    try:
-                        quorum_conn = http.client.HTTPConnection(settings.QUORUM_ADDRPORT[0], settings.QUORUM_ADDRPORT[1])
-                        quorum_conn.request("GET", "/front", urlencode(client))
-                        response = quorum_conn.getresponse()
+                try:
+                    print("Asking for front for", client)
+                    addrport = settings.QUORUM_ADDRPORT
+                    quorum_conn = http.client.HTTPConnection(addrport[0], addrport[1])
+                    quorum_conn.request("POST", "/front", pickle.dumps(client))
+                    response = quorum_conn.getresponse()
+                    quorum_conn.close()
 
-                        if response.status == 200:
-                            s.sendto(b"FRONT" + response.read(), addr)
-                            break
-                    except OSError:
-                        pass
+                    if response.status == 200:
+                        s.sendto(b"FRONT:" + response.read(), addr)
+
+                except OSError:
+                    pass
 
 if __name__ == "__main__":
     main()
