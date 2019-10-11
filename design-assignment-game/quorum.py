@@ -51,7 +51,7 @@ def front_pong_listener(s):
                         front["pingcount"] = 0
 
                         if front["failed"]:
-                            front["failed"] = True
+                            front["failed"] = False
                             print("Front", id, "back alive")
 
 # caller must have fronts_lock and players_lock
