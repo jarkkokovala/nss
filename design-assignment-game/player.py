@@ -101,24 +101,31 @@ def player_listener(s, s_lock, cmd_queue):
                 with front_lock:
                     section = None
                     front = None
-            elif data[:4] == b"PING":
-                with s_lock:
-                    s.sendto(b"PONG " + data[5:], addr)
             else:
                 with front_lock:
                     if addr != front:
+                        print("Unknown sender!")
                         raise Exception
 
                 last_front_msg = time.time()
 
-                if data[:3] == b"ACK":
+                if data[:4] == b"PING":
+                    current_rtt, timestamp = struct.unpack("!dd", data[4:])
+
+                    print(current_rtt, timestamp)
+                    with s_lock:
+                        if(random.randint(1, 100) > settings.PACKET_LOSS):
+                            s.sendto(b"PONG " + struct.pack("!d", timestamp), addr)
+                elif data[:3] == b"ACK":
                     seq = struct.unpack_from("!l", data[3:])[0]
 
                     if seq in outbound_cmds:
                         del outbound_cmds[seq]
                     
-                    while last_ack < seq and last_ack not in outbound_cmds:
-                        last_ack += 1
+                    with front_lock:
+                        if seq < front_seq:
+                            while last_ack < seq and last_ack not in outbound_cmds:
+                                last_ack += 1
         except socket.timeout:
             if time.time() - last_front_msg > settings.FRONT_TIMEOUT:
                 with front_lock:
@@ -149,11 +156,11 @@ def player_listener(s, s_lock, cmd_queue):
             if timestamp is not None and seq in outbound_cmds:
                 if time.time() + current_rtt >= timestamp:
                     with front_lock, s_lock:
-                        s.sendto(outbound_cmds[seq], front)
+                        if front:
+                            s.sendto(outbound_cmds[seq], front)
                     timestamp = time.time()
 
                 resend_queue.put((timestamp, seq))
-
         except queue.Empty:
             pass
 

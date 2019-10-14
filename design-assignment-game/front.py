@@ -42,7 +42,8 @@ def front_listener(s, s_lock):
                 if data == b"PING":
                     last_quorum_ping = time.time()
                     with s_lock:
-                        s.sendto(b"PONG", addr)
+                        if(random.randint(1, 100) > settings.PACKET_LOSS):
+                            s.sendto(b"PONG", addr)
             else:
                 with players_lock:
                     player = None
@@ -55,7 +56,7 @@ def front_listener(s, s_lock):
                         if data[:4] == b"PONG":
                             player["pingcount"] = 0
                             rtt = time.time() - struct.unpack("!d", data[5:])[0]
-                            player["RTT"] = rtt
+                            player["rtt"] = rtt
                         else:
                             seq = struct.unpack_from("!l", data)[0]
                             payload = data[4:]
@@ -73,7 +74,8 @@ def front_listener(s, s_lock):
                                 player["last_ack"] += 1
                     else:
                         with s_lock:
-                            s.sendto(b"FRONT!", addr)
+                            if(random.randint(1, 100) > settings.PACKET_LOSS):
+                                s.sendto(b"FRONT!", addr)
         except socket.timeout:
             pass
             
@@ -89,7 +91,8 @@ def front_sender(s, s_lock):
                 players[player]["pingcount"] += 1
 
                 with s_lock:
-                    s.sendto(b"PING " + struct.pack("!d", time.time()), players[player]["addr"])
+                    if(random.randint(1, 100) > settings.PACKET_LOSS):
+                        s.sendto(b"PING" + struct.pack("!dd", players[player]["rtt"], time.time()), players[player]["addr"])
 
         time.sleep(1)
 
@@ -136,7 +139,7 @@ class front_http_handler(BaseHTTPRequestHandler):
             player = pickle.loads(body)
             id = next(iter(player))
             player[id]["pingcount"] = 0
-            player[id]["RTT"] = settings.PLAYER_INITIAL_RTT
+            player[id]["rtt"] = settings.PLAYER_INITIAL_RTT
             player[id]["last_ack"] = -1 # last consecutively acked packet
             player[id]["recv_buffer"] = {} # list of received packet id's after last_ack
 
