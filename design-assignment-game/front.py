@@ -6,6 +6,7 @@ import struct
 import time
 import threading
 import random
+import queue
 import pickle
 import urllib
 from urllib.parse import urlparse, parse_qs
@@ -24,15 +25,37 @@ sections_lock = threading.Lock()
 players = {}
 players_lock = threading.Lock()
 
-
 print("Starting front #", FRONT, addrport)
 
-def player_command(player, cmd):
+# Caller must have sections_lock, players_lock
+def update_object(section_id, id, s, s_lock, resend_queue):
+    section = sections[section_id]
+    obj = section["objects"][id]
+
+    section["version"] += 1
+    version = section["version"]
+
+    for p in players:
+        if players[p]["section"] == section_id:
+            packet = b"UPDATE" + pickle.dumps((version, id, obj))
+            players[p]["send_buffer"][version] = packet
+
+            with s_lock:
+                s.sendto(packet, players[p]["addr"])
+                resend_queue.put((time.time() + 2 * players[p]["rtt"], (p, version)))
+
+# Caller must have sections_lock, players_lock
+def player_command(player, cmd, s, s_lock, resend_queue):
+    id = player["id"]
+
     if cmd == b"NOP":
         print("NOP from", player["name"])
+        update_object(player["section"], id, s, s_lock, resend_queue)
 
 def front_listener(s, s_lock):
     last_quorum_ping = time.time()
+    resend_queue = queue.PriorityQueue()
+    next_timeout = 1
 
     while True:
         try:
@@ -45,18 +68,33 @@ def front_listener(s, s_lock):
                         if(random.randint(1, 100) > settings.PACKET_LOSS):
                             s.sendto(b"PONG", addr)
             else:
-                with players_lock:
+                with sections_lock, players_lock:
                     player = None
 
                     for p in players:
                         if players[p]["addr"] == addr:
                             player = players[p]
+                            break
          
                     if player:
                         if data[:4] == b"PONG":
                             player["pingcount"] = 0
-                            rtt = time.time() - struct.unpack("!d", data[5:])[0]
+                            rtt = time.time() - struct.unpack("!d", data[4:])[0]
                             player["rtt"] = rtt
+                        elif data[:3] == b"ACK":
+                            version = struct.unpack_from("!l", data[3:])[0]
+                            cur_version = sections[player["section"]]["version"]
+
+                            if version < sections[player["section"]]["version"] and version + 1 in player["send_buffer"]:
+                                with s_lock:
+                                    s.sendto(player["send_buffer"][version + 1], addr)
+                            
+                            if version in player["send_buffer"]:
+                                del player["send_buffer"][version]
+                            
+                            while player["last_recvd_ack"] < cur_version and player["last_recvd_ack"] not in player["send_buffer"]:
+                                player["last_recvd_ack"] += 1
+
                         else:
                             seq = struct.unpack_from("!l", data)[0]
                             payload = data[4:]
@@ -65,13 +103,13 @@ def front_listener(s, s_lock):
                                 if(random.randint(1, 100) > settings.PACKET_LOSS):
                                     s.sendto(b"ACK" + struct.pack("!l", seq), addr)
 
-                            if seq > player["last_ack"] and seq not in player["recv_buffer"]:
+                            if seq > player["last_sent_ack"] and seq not in player["recv_buffer"]:
                                 player["recv_buffer"][seq] = payload
                             
-                            while player["last_ack"] + 1 in player["recv_buffer"]:
-                                player_command(player, payload)
-                                del player["recv_buffer"][player["last_ack"] + 1]
-                                player["last_ack"] += 1
+                            while player["last_sent_ack"] + 1 in player["recv_buffer"]:
+                                player_command(player, payload, s, s_lock, resend_queue)
+                                del player["recv_buffer"][player["last_sent_ack"] + 1]
+                                player["last_sent_ack"] += 1
                     else:
                         with s_lock:
                             if(random.randint(1, 100) > settings.PACKET_LOSS):
@@ -82,6 +120,28 @@ def front_listener(s, s_lock):
         if time.time() - last_quorum_ping > settings.FRONT_TIMEOUT:
             print("Quorum silent, dying")
             sys.exit(0)
+
+        next_timeout = 1
+
+        try:
+            while True:
+                timestamp, (player, version) = resend_queue.get(False)
+
+                if timestamp < time.time():
+                    with players_lock, s_lock:
+                        if player in players and version > players[player]["last_recvd_ack"]:
+                            s.sendto(players[player]["send_buffer"][version], players[player]["addr"])
+                            timestamp = time.time() + 2 * players[player]["rtt"]
+                            resend_queue.put((timestamp, (player, version)))
+                            next_timeout = min(time.time() - timestamp, next_timeout)
+                else:
+                    resend_queue.put((timestamp, (player, version)))
+                    next_timeout = min(time.time() - timestamp, next_timeout)
+                    break
+        except queue.Empty:
+            pass
+        
+
 
 def front_sender(s, s_lock):
     print("Starting front sender")
@@ -123,6 +183,9 @@ class front_http_handler(BaseHTTPRequestHandler):
                         self.send_response(200)
                         self.end_headers()
                         self.wfile.write(pickle.dumps(sections[section]))
+
+                        players[player]["send_buffer"] = {}
+                        players[player]["last_recvd_ack"] = sections[section]["version"]
             else:
                 self.send_response(400)
                 self.end_headers()
@@ -140,11 +203,11 @@ class front_http_handler(BaseHTTPRequestHandler):
             id = next(iter(player))
             player[id]["pingcount"] = 0
             player[id]["rtt"] = settings.PLAYER_INITIAL_RTT
-            player[id]["last_ack"] = -1 # last consecutively acked packet
-            player[id]["recv_buffer"] = {} # list of received packet id's after last_ack
+            player[id]["last_sent_ack"] = -1 # last consecutively acked packet
+            player[id]["recv_buffer"] = {} # list of received packet id's after last_sent_ack
 
             print("Adding player", player)
-            with players_lock:
+            with sections_lock, players_lock:
                 players.update(player)
             
             self.send_response(200)
