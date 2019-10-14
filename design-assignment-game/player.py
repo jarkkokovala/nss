@@ -23,10 +23,13 @@ front_lock = threading.Lock() # Protects front and front_seq
 def login_blackbox():
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
 
-# Caller must protect s with lock
+def try_send(s, packet, addr):
+    if(random.randint(1, 100) > settings.PACKET_LOSS):
+        s.sendto(packet, addr)
+
 def get_front(s, session):
     packet = pickle.dumps({"id" : PLAYER, "session": session})
-    s.sendto(b"FRONT?" + packet, settings.LOGIN_ADDRPORT)
+    try_send(s, b"FRONT?" + packet, settings.LOGIN_ADDRPORT)
 
     try:
         s.settimeout(settings.PLAYER_TIMEOUT)
@@ -158,8 +161,7 @@ def player_listener(s, s_lock, cmd_queue):
                     current_rtt, timestamp = struct.unpack("!dd", data[4:])
 
                     with s_lock:
-                        if(random.randint(1, 100) > settings.PACKET_LOSS):
-                            s.sendto(b"PONG" + struct.pack("!d", timestamp), addr)
+                        try_send(s, b"PONG" + struct.pack("!d", timestamp), addr)
                 elif data[:3] == b"ACK":
                     seq = struct.unpack_from("!l", data[3:])[0]
 
@@ -186,7 +188,7 @@ def player_listener(s, s_lock, cmd_queue):
                             last_acked_version += 1
 
                     with s_lock:
-                        s.sendto(b"ACK" + struct.pack("!l", last_acked_version), addr)
+                        try_send(s, b"ACK" + struct.pack("!l", last_acked_version), addr)
 
                     if section["objects"][obj]["version"] < version:
                         section["objects"][obj] = data
@@ -213,14 +215,15 @@ def player_listener(s, s_lock, cmd_queue):
             timestamp, seq = resend_queue.get(False)
 
             if seq in outbound_cmds:
-                to_next_resend = (timestamp + 2 * current_rtt) - time.time()
+                to_next_resend = timestamp + 2 * current_rtt - time.time()
 
                 if to_next_resend <= 0:
                     with front_lock, s_lock:
                         if front:
                             print("Resend", seq, "at", time.time())
-                            s.sendto(outbound_cmds[seq], front)
+                            try_send(s, outbound_cmds[seq], front)
                     timestamp = time.time()
+                    next_listen_timeout = min(2 * current_rtt, next_listen_timeout)
                 else:
                     next_listen_timeout = min(to_next_resend, next_listen_timeout)
 
@@ -243,8 +246,7 @@ class Command_sender:
             print("Sending command", front_seq, packet)
 
             with self.s_lock:
-                if(random.randint(1, 100) > settings.PACKET_LOSS):
-                    self.s.sendto(packet, front)
+                try_send(self.s, packet, front)
             
             print("Putting in command queue")
             self.cmd_queue.put((front_seq, packet, time.time()))

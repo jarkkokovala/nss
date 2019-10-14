@@ -27,6 +27,10 @@ players_lock = threading.Lock()
 
 print("Starting front #", FRONT, addrport)
 
+def try_send(s, packet, addr):
+    if(random.randint(1, 100) > settings.PACKET_LOSS):
+        s.sendto(packet, addr)
+
 # Caller must have sections_lock, players_lock
 def update_object(section_id, id, s, s_lock, resend_queue):
     section = sections[section_id]
@@ -41,8 +45,8 @@ def update_object(section_id, id, s, s_lock, resend_queue):
             players[p]["send_buffer"][version] = packet
 
             with s_lock:
-                s.sendto(packet, players[p]["addr"])
-                resend_queue.put((time.time() + 2 * players[p]["rtt"], (p, version)))
+                try_send(s, packet, players[p]["addr"])
+                resend_queue.put((time.time(), (p, version)))
 
 # Caller must have sections_lock, players_lock
 def player_command(player, cmd, s, s_lock, resend_queue):
@@ -65,8 +69,7 @@ def front_listener(s, s_lock):
                 if data == b"PING":
                     last_quorum_ping = time.time()
                     with s_lock:
-                        if(random.randint(1, 100) > settings.PACKET_LOSS):
-                            s.sendto(b"PONG", addr)
+                        try_send(s, b"PONG", addr)
             else:
                 with sections_lock, players_lock:
                     player = None
@@ -87,7 +90,7 @@ def front_listener(s, s_lock):
 
                             if version < sections[player["section"]]["version"] and version + 1 in player["send_buffer"]:
                                 with s_lock:
-                                    s.sendto(player["send_buffer"][version + 1], addr)
+                                    try_send(s, player["send_buffer"][version + 1], addr)
                             
                             if version in player["send_buffer"]:
                                 del player["send_buffer"][version]
@@ -100,8 +103,7 @@ def front_listener(s, s_lock):
                             payload = data[4:]
 
                             with s_lock:
-                                if(random.randint(1, 100) > settings.PACKET_LOSS):
-                                    s.sendto(b"ACK" + struct.pack("!l", seq), addr)
+                                try_send(s, b"ACK" + struct.pack("!l", seq), addr)
 
                             if seq > player["last_sent_ack"] and seq not in player["recv_buffer"]:
                                 player["recv_buffer"][seq] = payload
@@ -112,8 +114,7 @@ def front_listener(s, s_lock):
                                 player["last_sent_ack"] += 1
                     else:
                         with s_lock:
-                            if(random.randint(1, 100) > settings.PACKET_LOSS):
-                                s.sendto(b"FRONT!", addr)
+                            try_send(s, b"FRONT!", addr)
         except socket.timeout:
             pass
             
@@ -127,17 +128,20 @@ def front_listener(s, s_lock):
             while True:
                 timestamp, (player, version) = resend_queue.get(False)
 
-                if timestamp < time.time():
-                    with players_lock, s_lock:
-                        if player in players and version > players[player]["last_recvd_ack"]:
-                            s.sendto(players[player]["send_buffer"][version], players[player]["addr"])
-                            timestamp = time.time() + 2 * players[player]["rtt"]
+                with players_lock:
+                    if player in players and version > players[player]["last_recvd_ack"]:
+                        to_next_resend = timestamp + 2 * players[player]["rtt"] - time.time()
+
+                        if to_next_resend < 0:
+                            with s_lock:
+                                try_send(s, players[player]["send_buffer"][version], players[player]["addr"])
+                            timestamp = time.time()
                             resend_queue.put((timestamp, (player, version)))
-                            next_timeout = min(time.time() - timestamp, next_timeout)
-                else:
-                    resend_queue.put((timestamp, (player, version)))
-                    next_timeout = min(time.time() - timestamp, next_timeout)
-                    break
+                            next_timeout = min(2 * players[player]["rtt"], next_timeout)
+                        else:
+                            resend_queue.put((timestamp, (player, version)))
+                            next_timeout = min(to_next_resend, next_timeout)
+                            break
         except queue.Empty:
             pass
         
@@ -151,8 +155,7 @@ def front_sender(s, s_lock):
                 players[player]["pingcount"] += 1
 
                 with s_lock:
-                    if(random.randint(1, 100) > settings.PACKET_LOSS):
-                        s.sendto(b"PING" + struct.pack("!dd", players[player]["rtt"], time.time()), players[player]["addr"])
+                    try_send(s, b"PING" + struct.pack("!dd", players[player]["rtt"], time.time()), players[player]["addr"])
 
         time.sleep(1)
 
