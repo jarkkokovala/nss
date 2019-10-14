@@ -5,6 +5,7 @@ import socket
 import struct
 import time
 import threading
+import random
 import pickle
 import urllib
 from urllib.parse import urlparse, parse_qs
@@ -26,6 +27,10 @@ players_lock = threading.Lock()
 
 print("Starting front #", FRONT, addrport)
 
+def player_command(player, cmd):
+    if cmd == b"NOP":
+        print("NOP from", player["name"])
+
 def front_listener(s, s_lock):
     last_quorum_ping = time.time()
 
@@ -45,17 +50,32 @@ def front_listener(s, s_lock):
                     for p in players:
                         if players[p]["addr"] == addr:
                             player = players[p]
-                    
+         
                     if player:
                         if data[:4] == b"PONG":
                             player["pingcount"] = 0
                             rtt = time.time() - struct.unpack("!d", data[5:])[0]
                             player["RTT"] = rtt
+                        else:
+                            seq = struct.unpack_from("!l", data)[0]
+                            payload = data[4:]
+
+                            with s_lock:
+                                if(random.randint(1, 100) > settings.PACKET_LOSS):
+                                    s.sendto(b"ACK" + struct.pack("!l", seq), addr)
+
+                            if seq > player["last_ack"] and seq not in player["recv_buffer"]:
+                                player["recv_buffer"][seq] = payload
+                            
+                            while player["last_ack"] + 1 in player["recv_buffer"]:
+                                player_command(player, payload)
+                                del player["recv_buffer"][player["last_ack"] + 1]
+                                player["last_ack"] += 1
                     else:
                         with s_lock:
                             s.sendto(b"FRONT!", addr)
         except socket.timeout:
-            print("Timed out listening")
+            pass
             
         if time.time() - last_quorum_ping > settings.FRONT_TIMEOUT:
             print("Quorum silent, dying")
@@ -72,6 +92,12 @@ def front_sender(s, s_lock):
                     s.sendto(b"PING " + struct.pack("!d", time.time()), players[player]["addr"])
 
         time.sleep(1)
+
+        with players_lock:
+            for player in list(players):
+                if players[player]["pingcount"] >= 5:
+                    del players[player]
+                    print("Player", player, "timed out")
 
 class front_http_handler(BaseHTTPRequestHandler):
     def do_GET(self):
@@ -111,6 +137,8 @@ class front_http_handler(BaseHTTPRequestHandler):
             id = next(iter(player))
             player[id]["pingcount"] = 0
             player[id]["RTT"] = settings.PLAYER_INITIAL_RTT
+            player[id]["last_ack"] = -1 # last consecutively acked packet
+            player[id]["recv_buffer"] = {} # list of received packet id's after last_ack
 
             print("Adding player", player)
             with players_lock:

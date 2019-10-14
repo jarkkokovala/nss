@@ -17,6 +17,11 @@ def main():
                 client = pickle.loads(data[6:])
                 client["addr"] = addr
 
+                # TODO (after real player login has been implemented)
+                # check that request game from valid session
+                # and get player id from session data instead
+                # of trusting client
+
                 try:
                     print("Asking for front for", client)
                     addrport = settings.QUORUM_ADDRPORT
