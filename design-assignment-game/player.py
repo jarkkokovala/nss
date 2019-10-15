@@ -265,20 +265,29 @@ class Command_sender:
 def player_command(s, s_lock, cmd_queue):
     sender = Command_sender(s, s_lock, cmd_queue)
 
-    help = "Commands: n - nop, q - quit, ? - help"
+    help = "Commands: s <0-5> - change speed, d <0-360> - change direction, n - nop, q - quit, ? - help"
     print(help)
 
     while True:
         print("> ", end='')
         cmd = input().lower()
 
-        if cmd == "n":
+        if len(cmd) > 2:
+            param = cmd[2:]
+        else:
+            param = "0"
+
+        if cmd[:1] == "n":
             sender.send(b"NOP")
-        elif cmd == "q":
+        elif cmd[:1] == "s" and int(param) >= 0 and int(param) <= 5:
+            sender.send(b"SPEED" + struct.pack("!h", int(param)))
+        elif cmd[:1] == "d" and int(param) >= 0 and int(param) <= 360:
+            sender.send(b"DIR" + struct.pack("!h", int(param)))
+        elif cmd[:1] == "q":
             sender.send(b"QUIT")
             print("Bye!")
             break
-        elif cmd == "?":
+        elif cmd[:1] == "?":
             print(help)
         elif cmd == "":
             continue

@@ -7,6 +7,7 @@ import time
 import threading
 import random
 import queue
+import math
 import pickle
 import urllib
 import http.client
@@ -20,8 +21,6 @@ if len(sys.argv) < 2:
 FRONT = int(sys.argv[1])
 addrport = settings.INITIAL_FRONTS[FRONT]["address"]
 
-STORE_MAGIC = -1
-
 sections = settings.INITIAL_SECTIONS_FOR_FRONTS[FRONT]
 sections_lock = threading.Lock()
 
@@ -30,14 +29,47 @@ players_lock = threading.Lock()
 
 print("Starting front #", FRONT, addrport)
 
+s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+s_lock = threading.Lock()
+
+resend_queue = queue.PriorityQueue()
+store_resend_queue = queue.PriorityQueue()
+
+# Caller must have s_lock
 def try_send(s, packet, addr):
     if(random.randint(1, 100) > settings.PACKET_LOSS):
         s.sendto(packet, addr)
 
+
+# Caller must have sections_lock
+def clean_object(obj):
+    obj = obj.copy()
+
+    if "last_move" in obj:
+        del obj["last_move"]
+    
+    return obj
+
+# Caller must have sections_lock
+def clean_section(section):
+    section = section.copy()
+
+    if "store_buffer" in section:
+        del section["store_buffer"]
+
+    section["objects"] = section["objects"].copy()
+
+    for obj in section["objects"]:
+        section["objects"][obj] = clean_object(section["objects"][obj])
+
+    return section
+
 # Caller must have sections_lock, players_lock
-def update_object(section_id, id, s, s_lock, resend_queue, store_resend_queue):
+def update_object(section_id, id):
+    global s, s_lock, resend_queue, store_resend_queue
+
     section = sections[section_id]
-    obj = section["objects"][id]
+    obj = clean_object(section["objects"][id])
 
     section["version"] += 1
     version = section["version"]
@@ -49,7 +81,7 @@ def update_object(section_id, id, s, s_lock, resend_queue, store_resend_queue):
     store_resend_queue.put((time.time(), (section_id, version)))
 
     for p in players:
-        if players[p]["section"] == section_id:
+        if players[p]["section"] == section_id and "send_buffer" in players[p]:
             packet = b"UPDATE" + pickle.dumps((version, id, obj))
             players[p]["send_buffer"][version] = packet
 
@@ -57,13 +89,25 @@ def update_object(section_id, id, s, s_lock, resend_queue, store_resend_queue):
                 try_send(s, packet, players[p]["addr"])
                 resend_queue.put((time.time(), (p, version)))
 
-def clean_section(section):
-    section = section.copy()
+# Caller must have sections_lock
+def move_object(obj):
+    dir = math.radians(obj["direction"])
+    cur_loc = obj["loc"]
 
-    if "store_buffer" in section:
-        del section["store_buffer"]
+    interval = time.time() - obj["last_move"]
 
-    return section
+    xloc = round(cur_loc[0] + interval * obj["speed"] * math.cos(dir), 3)
+    yloc = round(cur_loc[1] + interval * obj["speed"] * math.sin(dir), 3)
+
+    obj["loc"] = (xloc, yloc)
+    obj["last_move"] = time.time()
+
+# Caller must have sections_lock, players_lock
+def move_all_in_section(section):
+    for obj in sections[section]["objects"]:
+        if sections[section]["objects"][obj]["speed"] > 0:
+            move_object(sections[section]["objects"][obj])
+            update_object(section, obj)
 
 # Caller must have sections_lock
 def store_section(section_id):
@@ -85,17 +129,42 @@ def store_section(section_id):
     return False
 
 # Caller must have sections_lock, players_lock
-def player_command(player, cmd, s, s_lock, resend_queue, store_resend_queue):
+def player_command(player, cmd):
     id = player["id"]
+    ship = sections[player["section"]]["objects"][id]
+
+    if ship["speed"] > 0:
+        move_object(ship)
 
     if cmd == b"NOP":
         print("NOP from", player["name"])
-        update_object(player["section"], id, s, s_lock, resend_queue, store_resend_queue)
+    if cmd[:5] == b"SPEED":
+        speed = struct.unpack_from("!h", cmd[5:])[0]
 
-def front_listener(s, s_lock):
+        if ship["speed"] == 0 and speed > 0:
+            ship["last_move"] = time.time()
+
+        ship["speed"] = speed
+
+        if speed == 0:
+            print(player["name"], "stopped")
+            if "last_move" in ship:
+                del ship["last_move"]
+        else:
+            print(player["name"], "changed speed to", speed)
+    if cmd[:3] == b"DIR":
+        dir = struct.unpack_from("!h", cmd[3:])[0]
+
+        ship["direction"] = dir
+        print(player["name"], "changed direction to", dir)
+
+    update_object(player["section"], id)
+
+def front_listener():
+    global s, s_lock, resend_queue, store_resend_queue
+
     last_quorum_ping = time.time()
-    resend_queue = queue.PriorityQueue()
-    store_resend_queue = queue.PriorityQueue()
+    last_move = time.time()
     next_timeout = 1
 
     while True:
@@ -157,7 +226,7 @@ def front_listener(s, s_lock):
                                 player["recv_buffer"][seq] = payload
                             
                             while player["last_sent_ack"]+1 in player["recv_buffer"]:
-                                player_command(player, payload, s, s_lock, resend_queue, store_resend_queue)
+                                player_command(player, payload)
                                 del player["recv_buffer"][player["last_sent_ack"]+1]
                                 player["last_sent_ack"] += 1
                     else:
@@ -213,8 +282,16 @@ def front_listener(s, s_lock):
                             break
         except queue.Empty:
             pass
+
+        if time.time() - last_move > 1:
+            with sections_lock, players_lock:
+                for section in sections:
+                    move_all_in_section(section)
+            last_move = time.time()
     
-def front_sender(s, s_lock):
+def front_sender():
+    global s, s_lock
+
     print("Starting front sender")
     while True:
         with players_lock:
@@ -234,6 +311,7 @@ def front_sender(s, s_lock):
 
 class front_http_handler(BaseHTTPRequestHandler):
     def do_GET(self):
+        global s, s_lock
         protocol_version = "HTTP/1.1"
 
         query = urlparse(self.path)
@@ -247,8 +325,10 @@ class front_http_handler(BaseHTTPRequestHandler):
                 with sections_lock, players_lock:
                     if player in players and players[player]["session"] == session:
                         section = players[player]["section"]
+
+                        move_all_in_section(section)
+
                         print("Giving section", section, "to player", player)
-                        print(sections[section])
 
                         self.send_response(200)
                         self.end_headers()
@@ -298,6 +378,12 @@ def front_http_server():
     httpd.server_close()
 
 def main():
+    global s, s_lock
+
+    with s_lock:
+        s.bind(addrport)
+        s.settimeout(settings.FRONT_TIMEOUT)
+
     with sections_lock:
         for section in sections:
             while not store_section(section):
@@ -306,20 +392,14 @@ def main():
     front_http_server_thread = threading.Thread(target=front_http_server)
     front_http_server_thread.start()
 
-    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
-        s_lock = threading.Lock()
+    front_listener_thread = threading.Thread(target=front_listener)
+    front_listener_thread.start()
 
-        s.bind(addrport)
-        s.settimeout(settings.FRONT_TIMEOUT)
+    front_sender_thread = threading.Thread(target=front_sender)
+    front_sender_thread.start()
 
-        front_listener_thread = threading.Thread(target=front_listener, args=(s, s_lock))
-        front_listener_thread.start()
-
-        front_sender_thread = threading.Thread(target=front_sender, args=(s, s_lock))
-        front_sender_thread.start()
-
-        front_listener_thread.join()
-        front_sender_thread.join()
+    front_listener_thread.join()
+    front_sender_thread.join()
 
     front_http_server_thread.join()
 
