@@ -75,12 +75,17 @@ def flush_commands(cmd_queue, outbound_cmds, resend_queue):
             seq, packet, timestamp = cmd_queue.get(False)
 
             if seq is not None:
+                if packet == b"QUIT":
+                    return False
+
                 outbound_cmds[seq] = packet
                 resend_queue.put((timestamp, seq))
             else:
                 break
     except queue.Empty:
         pass
+
+    return True
 
 def display_object(objects, o):
     obj = objects[o]
@@ -165,7 +170,8 @@ def player_listener(s, s_lock, cmd_queue):
                 elif data[:3] == b"ACK":
                     seq = struct.unpack_from("!l", data[3:])[0]
 
-                    flush_commands(cmd_queue, outbound_cmds, resend_queue)
+                    if not flush_commands(cmd_queue, outbound_cmds, resend_queue):
+                        break
 
                     if seq in outbound_cmds:
                         print("ACK for", seq)
@@ -204,10 +210,9 @@ def player_listener(s, s_lock, cmd_queue):
             pass
         except Exception:
             pass
-        except:
-            break
 
-        flush_commands(cmd_queue, outbound_cmds, resend_queue)
+        if not flush_commands(cmd_queue, outbound_cmds, resend_queue):
+            break
 
         next_listen_timeout = current_rtt
 
@@ -240,17 +245,22 @@ class Command_sender:
     def send(self, data):
         global front_seq
 
-        with front_lock:
-            packet = struct.pack("!l", front_seq) + data
+        if data == b"QUIT":
+            with front_lock, self.s_lock:
+                try_send(self.s, b"QUIT", front)
+            self.cmd_queue.put((front_seq, b"QUIT", time.time()))
+        else:
+            with front_lock:
+                packet = struct.pack("!l", front_seq) + data
 
-            print("Sending command", front_seq, packet)
+                print("Sending command", front_seq, packet)
 
-            with self.s_lock:
-                try_send(self.s, packet, front)
-            
-            print("Putting in command queue")
-            self.cmd_queue.put((front_seq, packet, time.time()))
-            front_seq += 1
+                with self.s_lock:
+                    try_send(self.s, packet, front)
+                
+                print("Putting in command queue")
+                self.cmd_queue.put((front_seq, packet, time.time()))
+                front_seq += 1
 
 def player_command(s, s_lock, cmd_queue):
     sender = Command_sender(s, s_lock, cmd_queue)
@@ -265,6 +275,7 @@ def player_command(s, s_lock, cmd_queue):
         if cmd == "n":
             sender.send(b"NOP")
         elif cmd == "q":
+            sender.send(b"QUIT")
             print("Bye!")
             break
         elif cmd == "?":
@@ -290,11 +301,10 @@ def main():
         player_listener_thread.start()
 
         player_command_thread.join()
+        player_listener_thread.join()
 
         with s_lock:
             s.close()
-
-        player_listener_thread.join()
 
 if __name__ == "__main__":
     main()

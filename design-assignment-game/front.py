@@ -9,6 +9,7 @@ import random
 import queue
 import pickle
 import urllib
+import http.client
 from urllib.parse import urlparse, parse_qs
 from http.server import BaseHTTPRequestHandler, HTTPServer
 
@@ -18,6 +19,8 @@ if len(sys.argv) < 2:
 
 FRONT = int(sys.argv[1])
 addrport = settings.INITIAL_FRONTS[FRONT]["address"]
+
+STORE_MAGIC = -1
 
 sections = settings.INITIAL_SECTIONS_FOR_FRONTS[FRONT]
 sections_lock = threading.Lock()
@@ -32,12 +35,18 @@ def try_send(s, packet, addr):
         s.sendto(packet, addr)
 
 # Caller must have sections_lock, players_lock
-def update_object(section_id, id, s, s_lock, resend_queue):
+def update_object(section_id, id, s, s_lock, resend_queue, store_resend_queue):
     section = sections[section_id]
     obj = section["objects"][id]
 
     section["version"] += 1
     version = section["version"]
+
+    store_packet = b"UPDATE" + pickle.dumps((section_id, version, id, obj))
+    with s_lock:
+        try_send(s, store_packet, settings.STORE_ADDRPORT)
+    sections[section_id]["store_buffer"][version] = store_packet
+    store_resend_queue.put((time.time(), (section_id, version)))
 
     for p in players:
         if players[p]["section"] == section_id:
@@ -48,17 +57,45 @@ def update_object(section_id, id, s, s_lock, resend_queue):
                 try_send(s, packet, players[p]["addr"])
                 resend_queue.put((time.time(), (p, version)))
 
+def clean_section(section):
+    section = section.copy()
+
+    if "store_buffer" in section:
+        del section["store_buffer"]
+
+    return section
+
+# Caller must have sections_lock
+def store_section(section_id):
+    store_conn = http.client.HTTPConnection(settings.STORE_ADDRPORT[0], settings.STORE_ADDRPORT[1])
+    data = pickle.dumps((section_id, clean_section(sections[section_id]), FRONT, addrport))
+
+    try:
+        store_conn.request("POST", "/map", data)
+
+        response = store_conn.getresponse()
+        store_conn.close()
+
+        if response.status == 200:
+            sections[section_id]["store_buffer"] = {}
+            return True
+    except OSError:
+        pass
+    
+    return False
+
 # Caller must have sections_lock, players_lock
-def player_command(player, cmd, s, s_lock, resend_queue):
+def player_command(player, cmd, s, s_lock, resend_queue, store_resend_queue):
     id = player["id"]
 
     if cmd == b"NOP":
         print("NOP from", player["name"])
-        update_object(player["section"], id, s, s_lock, resend_queue)
+        update_object(player["section"], id, s, s_lock, resend_queue, store_resend_queue)
 
 def front_listener(s, s_lock):
     last_quorum_ping = time.time()
     resend_queue = queue.PriorityQueue()
+    store_resend_queue = queue.PriorityQueue()
     next_timeout = 1
 
     while True:
@@ -70,6 +107,13 @@ def front_listener(s, s_lock):
                     last_quorum_ping = time.time()
                     with s_lock:
                         try_send(s, b"PONG", addr)
+            elif addr == settings.STORE_ADDRPORT:
+                if data[:3] == b"ACK":
+                    section, version = struct.unpack_from("!ll", data[3:])
+
+                    with sections_lock:
+                        if section in sections and version in sections[section]["store_buffer"]:
+                            del sections[section]["store_buffer"][version]
             else:
                 with sections_lock, players_lock:
                     player = None
@@ -92,12 +136,16 @@ def front_listener(s, s_lock):
                                 with s_lock:
                                     try_send(s, player["send_buffer"][version + 1], addr)
                             
-                            if version in player["send_buffer"]:
-                                del player["send_buffer"][version]
+                            for seq in list(player["send_buffer"]):
+                                if seq < version:
+                                    del player["send_buffer"][seq]
                             
                             while player["last_recvd_ack"] < cur_version and player["last_recvd_ack"] not in player["send_buffer"]:
                                 player["last_recvd_ack"] += 1
 
+                        elif data[:4] == b"QUIT":
+                            print("Player", player["id"], "quit")
+                            del players[player["id"]]
                         else:
                             seq = struct.unpack_from("!l", data)[0]
                             payload = data[4:]
@@ -108,9 +156,9 @@ def front_listener(s, s_lock):
                             if seq > player["last_sent_ack"] and seq not in player["recv_buffer"]:
                                 player["recv_buffer"][seq] = payload
                             
-                            while player["last_sent_ack"] + 1 in player["recv_buffer"]:
-                                player_command(player, payload, s, s_lock, resend_queue)
-                                del player["recv_buffer"][player["last_sent_ack"] + 1]
+                            while player["last_sent_ack"]+1 in player["recv_buffer"]:
+                                player_command(player, payload, s, s_lock, resend_queue, store_resend_queue)
+                                del player["recv_buffer"][player["last_sent_ack"]+1]
                                 player["last_sent_ack"] += 1
                     else:
                         with s_lock:
@@ -132,7 +180,7 @@ def front_listener(s, s_lock):
                     if player in players and version > players[player]["last_recvd_ack"]:
                         to_next_resend = timestamp + 2 * players[player]["rtt"] - time.time()
 
-                        if to_next_resend < 0:
+                        if to_next_resend < 0 and version in players[player]["send_buffer"]:
                             with s_lock:
                                 try_send(s, players[player]["send_buffer"][version], players[player]["addr"])
                             timestamp = time.time()
@@ -144,9 +192,28 @@ def front_listener(s, s_lock):
                             break
         except queue.Empty:
             pass
-        
 
+        try:
+            while True:
+                timestamp, (section_id, version) = store_resend_queue.get(False)
 
+                with sections_lock:
+                    if section_id in sections and version in sections[section_id]["store_buffer"]:
+                        to_next_resend = timestamp + settings.STORE_RESEND_TIMEOUT - time.time()
+
+                        if to_next_resend < 0:
+                            with s_lock:
+                                try_send(s, sections[section_id]["store_buffer"][version], settings.STORE_ADDRPORT)
+                            timestamp = time.time()
+                            store_resend_queue.put((timestamp, (section_id, version)))
+                            next_timeout = min(settings.STORE_RESEND_TIMEOUT, next_timeout)
+                        else:
+                            store_resend_queue.put((timestamp, (section_id, version)))
+                            next_timeout = min(to_next_resend, next_timeout)
+                            break
+        except queue.Empty:
+            pass
+    
 def front_sender(s, s_lock):
     print("Starting front sender")
     while True:
@@ -185,7 +252,7 @@ class front_http_handler(BaseHTTPRequestHandler):
 
                         self.send_response(200)
                         self.end_headers()
-                        self.wfile.write(pickle.dumps(sections[section]))
+                        self.wfile.write(pickle.dumps(clean_section(sections[section])))
 
                         players[player]["send_buffer"] = {}
                         players[player]["last_recvd_ack"] = sections[section]["version"]
@@ -231,6 +298,11 @@ def front_http_server():
     httpd.server_close()
 
 def main():
+    with sections_lock:
+        for section in sections:
+            while not store_section(section):
+                continue
+
     front_http_server_thread = threading.Thread(target=front_http_server)
     front_http_server_thread.start()
 
