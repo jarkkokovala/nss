@@ -105,6 +105,10 @@ class quorum_http_handler(BaseHTTPRequestHandler):
         elif query.path == "/move":
             player, (front, section) = pickle.loads(body)
 
+            for f in fronts:
+                if fronts[f]["address"] == front:
+                    new_front = f
+
             with players_lock:
                 players[player]["front"] = front
                 players[player]["section"] = section

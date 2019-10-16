@@ -70,6 +70,16 @@ def clean_section(section):
 
     return section
 
+# Caller must have players_lock
+def clean_player(player):
+    player = player.copy()
+
+    for x in ("pingcount", "rtt", "last_sent_ack", "recv_buffer", "send_buffer", "last_recvd_ack"):
+        if x in player:
+            del player[x]
+
+    return player
+
 # Caller must have sections_lock, players_lock
 def update_object(section_id, id):
     global s, s_lock, resend_queue, store_resend_queue
@@ -108,6 +118,7 @@ def move_object(obj):
     obj["loc"] = (xloc, yloc)
     obj["last_move"] = time.time()
 
+# Caller must have sections_lock
 def notify_quorum_of_move(obj, next_neighbor):
     quorum_conn = http.client.HTTPConnection(settings.QUORUM_ADDRPORT[0], settings.QUORUM_ADDRPORT[1])
 
@@ -116,6 +127,26 @@ def notify_quorum_of_move(obj, next_neighbor):
 
         response = quorum_conn.getresponse()
         quorum_conn.close()
+
+        if response.status == 200:
+            return True
+    except OSError:
+        pass
+
+    return False
+
+# Caller must have sections_lock, players_lock
+def send_player_to_front(neighbor, section, id, ship):
+    front_conn = http.client.HTTPConnection(neighbor[0], neighbor[1])
+
+    player = clean_player(players[id])
+    player["section"] = section
+
+    try:
+        front_conn.request("POST", "/move", pickle.dumps((player, ship)))
+
+        response = front_conn.getresponse()
+        front_conn.close()
 
         if response.status == 200:
             return True
@@ -159,12 +190,12 @@ def move_all_in_section(section):
                     sections[section]["objects"][obj]["loc"] = (xloc, -settings.SECTION_YSIZE/2)
             
             if next_neighbor is not None:
-                print("Next neighbor", next_neighbor)
+                print("Next neighbor", next_neighbor, addrport)
                 new_obj = clean_object(sections[section]["objects"][obj])
                 new_obj["loc"] = (xloc, yloc)
                 new_obj["last_move"] = time.time()
 
-                if next_neighbor[0] == FRONT:
+                if next_neighbor[0] == addrport:
                         print("Moving player to another section")
                         if notify_quorum_of_move(obj, next_neighbor):
                             sections[section]["objects"][obj] = None
@@ -183,6 +214,17 @@ def move_all_in_section(section):
                                     del players[obj]["send_buffer"]
                         else:
                             print("Quorum failed")
+                else:
+                    print("Transferring player to front", next_neighbor[0], "section", next_neighbor[1])
+                    
+                    if send_player_to_front(next_neighbor[0], next_neighbor[1], obj, new_obj):
+                        sections[section]["objects"][obj] = None
+                        if obj in players:
+                            with s_lock:
+                                s.sendto(b"FRONT:" + pickle.dumps(next_neighbor[0]), players[obj]["addr"])
+                            del players[obj]
+                    else:
+                        print("Transfer failed")
 
             update_object(section, obj)
 
@@ -438,6 +480,31 @@ class front_http_handler(BaseHTTPRequestHandler):
                 players.update(player)
             
             self.send_response(200)
+            self.end_headers()
+        elif query.path == "/move":
+            player, ship = pickle.loads(body)
+            id = player["id"]
+            section = player["section"]
+
+            print("Receiving player", id)
+
+            player["pingcount"] = 0
+            player["rtt"] = settings.PLAYER_INITIAL_RTT
+            player["last_sent_ack"] = -1
+            player["recv_buffer"] = {}
+            ship["last_move"] = time.time()
+
+            with sections_lock, players_lock:
+                if notify_quorum_of_move(id, (addrport, section)):
+                    sections[section]["objects"][id] = ship
+                    players[id] = player
+
+                    update_object(section, id)
+                    self.send_response(200)
+                    print("Received player", id)
+                else:
+                    self.send_response(503)
+            
             self.end_headers()
         else:
             self.send_error(404)

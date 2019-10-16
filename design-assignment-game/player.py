@@ -61,7 +61,7 @@ def get_section(front, session):
 
         if response.status == 200:
             section = pickle.loads(response.read())
-            print("Got new section", section)
+            print("Got new section.")
 
             for o in section["objects"]:
                 section["objects"][o]["version"] = section["version"]
@@ -180,7 +180,6 @@ def player_listener(s, s_lock, cmd_queue):
                         break
 
                     if seq in outbound_cmds:
-                        print("ACK for", seq)
                         del outbound_cmds[seq]
                     else:
                         print("Duplicate ACK", seq)
@@ -273,12 +272,9 @@ class Command_sender:
             with front_lock:
                 packet = struct.pack("!l", front_seq) + data
 
-                print("Sending command", front_seq, packet)
-
                 with self.s_lock:
                     try_send(self.s, packet, front)
                 
-                print("Putting in command queue")
                 self.cmd_queue.put((front_seq, packet, time.time()))
                 front_seq += 1
 
