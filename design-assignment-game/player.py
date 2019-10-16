@@ -28,6 +28,8 @@ def try_send(s, packet, addr):
         s.sendto(packet, addr)
 
 def get_front(s, session):
+    global front_seq
+
     packet = pickle.dumps({"id" : PLAYER, "session": session})
     try_send(s, b"FRONT?" + packet, settings.LOGIN_ADDRPORT)
 
@@ -40,6 +42,7 @@ def get_front(s, session):
 
     if data[:6] == b"FRONT:":
         front = pickle.loads(data[6:])
+
         print("Got new front", front)
 
         return front
@@ -132,6 +135,7 @@ def player_listener(s, s_lock, cmd_queue):
                     last_front_msg = time.time()
                 
                 if front:
+                    front_seq = 0
                     last_ack = -1
                     outbound_cmds = {}
                     resend_queue = queue.PriorityQueue()
@@ -183,6 +187,16 @@ def player_listener(s, s_lock, cmd_queue):
                         if seq < front_seq:
                             while last_ack < seq and last_ack not in outbound_cmds:
                                 last_ack += 1
+                elif data[:6] == b"FRONT:":
+                    front = pickle.loads(data[6:])
+
+                    last_front_msg = time.time()
+                    front_seq = 0
+                    last_ack = -1
+                    outbound_cmds = {}
+                    resend_queue = queue.PriorityQueue()
+                    recv_updates = []
+                    section = None
                 elif data[:6] == b"UPDATE":
                     version, obj, data = pickle.loads(data[6:])
 
@@ -196,7 +210,7 @@ def player_listener(s, s_lock, cmd_queue):
                     with s_lock:
                         try_send(s, b"ACK" + struct.pack("!l", last_acked_version), addr)
 
-                    if section["objects"][obj]["version"] < version:
+                    if obj not in section["objects"][obj] or section["objects"][obj]["version"] < version:
                         section["objects"][obj] = data
                         section["objects"][obj]["version"] = version
 
@@ -279,7 +293,7 @@ def player_command(s, s_lock, cmd_queue):
 
         if cmd[:1] == "n":
             sender.send(b"NOP")
-        elif cmd[:1] == "s" and int(param) >= 0 and int(param) <= 5:
+        elif cmd[:1] == "s" and int(param) >= 0 and int(param) <= 10:
             sender.send(b"SPEED" + struct.pack("!h", int(param)))
         elif cmd[:1] == "d" and int(param) >= 0 and int(param) <= 360:
             sender.send(b"DIR" + struct.pack("!h", int(param)))

@@ -13,13 +13,22 @@ INITIAL_FRONTS = {
 FRONT_TIMEOUT = 5
 
 INITIAL_SECTIONS_FOR_FRONTS = { 
-        1 : { 1 : { "version": 0, 
+        1 : {   
+                1 : { "version": 0, 
+                    "e-neighbor": (1, 2),
                     "name": "Section #1",
                     "objects": { 
                         1 : { "name" : "Player #1 ship", "loc": (1, 1), "speed": 0, "direction": 90 },
                         2 : { "name" : "Planet #1", "loc": (0, 0), "speed": 0 }
                     }
-            } } 
+                },
+                2 : { "version": 0,
+                    "w-neighbor": (1, 1),
+                    "name": "Section #2",
+                    "objects": {
+                    }
+                }
+            }
     }
 
 INITIAL_PLAYERS = { 
@@ -32,4 +41,4 @@ PLAYER_TIMEOUT = 1
 
 STORE_RESEND_TIMEOUT = 1
 
-PACKET_LOSS = 5
+PACKET_LOSS = 0

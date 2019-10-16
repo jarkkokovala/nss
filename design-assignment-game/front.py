@@ -43,6 +43,9 @@ def try_send(s, packet, addr):
 
 # Caller must have sections_lock
 def clean_object(obj):
+    if obj is None:
+        return None
+        
     obj = obj.copy()
 
     if "last_move" in obj:
@@ -59,8 +62,11 @@ def clean_section(section):
 
     section["objects"] = section["objects"].copy()
 
-    for obj in section["objects"]:
-        section["objects"][obj] = clean_object(section["objects"][obj])
+    for obj in list(section["objects"]):
+        if section["objects"][obj] is None:
+            del section["objects"][obj]
+        else:
+            section["objects"][obj] = clean_object(section["objects"][obj])
 
     return section
 
@@ -102,11 +108,82 @@ def move_object(obj):
     obj["loc"] = (xloc, yloc)
     obj["last_move"] = time.time()
 
+def notify_quorum_of_move(obj, next_neighbor):
+    quorum_conn = http.client.HTTPConnection(settings.QUORUM_ADDRPORT[0], settings.QUORUM_ADDRPORT[1])
+
+    try:
+        quorum_conn.request("POST", "/move", pickle.dumps((obj, next_neighbor)))
+
+        response = quorum_conn.getresponse()
+        quorum_conn.close()
+
+        if response.status == 200:
+            return True
+    except OSError:
+        pass
+
+    return False
+
 # Caller must have sections_lock, players_lock
 def move_all_in_section(section):
     for obj in sections[section]["objects"]:
-        if sections[section]["objects"][obj]["speed"] > 0:
+        if sections[section]["objects"][obj] is not None and sections[section]["objects"][obj]["speed"] > 0:
             move_object(sections[section]["objects"][obj])
+
+            xloc, yloc = sections[section]["objects"][obj]["loc"]
+            next_neighbor = None
+
+            if xloc > settings.SECTION_XSIZE/2:
+                if "e-neighbor" in sections[section]:
+                    next_neighbor = sections[section]["e-neighbor"]
+                    xloc -= settings.SECTION_XSIZE
+                else:
+                    sections[section]["objects"][obj]["loc"] = (settings.SECTION_XSIZE/2, yloc)
+            elif xloc < -settings.SECTION_XSIZE/2:
+                if "w-neighbor" in sections[section]:
+                    next_neighbor = sections[section]["w-neighbor"]
+                    xloc += settings.SECTION_XSIZE
+                else:
+                    sections[section]["objects"][obj]["loc"] = (-settings.SECTION_XSIZE/2, yloc)
+            elif yloc > settings.SECTION_YSIZE/2:
+                if "n-neighbor" in sections[section]:
+                    next_neighbor = sections[section]["n-neighbor"]
+                    yloc -= settings.SECTION_YSIZE
+                else:
+                    sections[section]["objects"][obj]["loc"] = (xloc, settings.SECTION_YSIZE/2)
+            elif yloc < -settings.SECTION_YSIZE/2:
+                if "s-neighbor" in sections[section]:
+                    next_neighbor = sections[section]["s-neighbor"]
+                    yloc += settings.SECTION_YSIZE
+                else:
+                    sections[section]["objects"][obj]["loc"] = (xloc, -settings.SECTION_YSIZE/2)
+            
+            if next_neighbor is not None:
+                print("Next neighbor", next_neighbor)
+                new_obj = clean_object(sections[section]["objects"][obj])
+                new_obj["loc"] = (xloc, yloc)
+                new_obj["last_move"] = time.time()
+
+                if next_neighbor[0] == FRONT:
+                        print("Moving player to another section")
+                        if notify_quorum_of_move(obj, next_neighbor):
+                            sections[section]["objects"][obj] = None
+                            sections[next_neighbor[1]]["objects"][obj] = new_obj
+                            update_object(next_neighbor[1], obj)
+                            if obj in players:
+                                players[obj]["section"] = next_neighbor[1]
+
+                                with s_lock:
+                                    s.sendto(b"FRONT:" + pickle.dumps(addrport), players[obj]["addr"])
+                                players[obj]["pingcount"] = 0
+                                players[obj]["rtt"] = settings.PLAYER_INITIAL_RTT
+                                players[obj]["last_sent_ack"] = -1 # last consecutively acked packet
+                                players[obj]["recv_buffer"] = {}
+                                if "send_buffer" in players[obj]:
+                                    del players[obj]["send_buffer"]
+                        else:
+                            print("Quorum failed")
+
             update_object(section, obj)
 
 # Caller must have sections_lock
@@ -222,6 +299,8 @@ def front_listener():
                             with s_lock:
                                 try_send(s, b"ACK" + struct.pack("!l", seq), addr)
 
+                            print(seq, player["last_sent_ack"], player["recv_buffer"])
+
                             if seq > player["last_sent_ack"] and seq not in player["recv_buffer"]:
                                 player["recv_buffer"][seq] = payload
                             
@@ -246,7 +325,7 @@ def front_listener():
                 timestamp, (player, version) = resend_queue.get(False)
 
                 with players_lock:
-                    if player in players and version > players[player]["last_recvd_ack"]:
+                    if player in players and "send_buffer" in players[player] and version > players[player]["last_recvd_ack"]:
                         to_next_resend = timestamp + 2 * players[player]["rtt"] - time.time()
 
                         if to_next_resend < 0 and version in players[player]["send_buffer"]:

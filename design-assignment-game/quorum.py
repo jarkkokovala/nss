@@ -102,6 +102,17 @@ class quorum_http_handler(BaseHTTPRequestHandler):
                 else:
                     self.send_error(503)
                     self.end_headers()
+        elif query.path == "/move":
+            player, (front, section) = pickle.loads(body)
+
+            with players_lock:
+                players[player]["front"] = front
+                players[player]["section"] = section
+
+            print("Player", player, "moved to front", front, "section", section)
+
+            self.send_response(200)
+            self.end_headers()
         else:
             self.send_error(404)
             self.end_headers()
