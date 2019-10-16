@@ -1,6 +1,6 @@
 # Quorum knows which fronts are alive and which map sections and players they have
 # Moves map sections in case of front failure
-# Jarkko Kovala <jarkko.kovala@helsinki.fi>
+# Jarkko Kovala <jarkko.kovala@iki.fi>
 
 import settings
 

@@ -1,5 +1,5 @@
 # Store saves map sections for fronts to be retrieved if necessary
-# Jarkko Kovala <jarkko.kovala@helsinki.fi>
+# Jarkko Kovala <jarkko.kovala@iki.fi>
 
 import settings
 

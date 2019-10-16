@@ -1,5 +1,5 @@
 # Player module is the user interface for the player
-# Jarkko Kovala <jarkko.kovala@helsinki.fi>
+# Jarkko Kovala <jarkko.kovala@iki.fi>
 
 import settings
 

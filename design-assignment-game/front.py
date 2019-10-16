@@ -1,5 +1,5 @@
 # Front module: handles game mechanics and communication to the player
-# Jarkko Kovala <jarkko.kovala@helsinki.fi>
+# Jarkko Kovala <jarkko.kovala@iki.fi>
 
 import settings
 
