@@ -1,3 +1,6 @@
+# Player module is the user interface for the player
+# Jarkko Kovala <jarkko.kovala@helsinki.fi>
+
 import settings
 
 import sys
@@ -20,13 +23,16 @@ front = None
 front_seq = 0
 front_lock = threading.Lock() # Protects front and front_seq
 
+# Log in and return session key
 def login_blackbox():
     return ''.join(random.choices(string.ascii_uppercase + string.digits, k=10))
 
+# Attempt to send, generate packet loss for testing
 def try_send(s, packet, addr):
     if(random.randint(1, 100) > settings.PACKET_LOSS):
         s.sendto(packet, addr)
 
+# Fetch a front for us
 def get_front(s, session):
     global front_seq
 
@@ -49,6 +55,7 @@ def get_front(s, session):
     else:
         return None
 
+# Fetch a section for us
 # Caller must have front_lock
 def get_section(front, session):
     front_conn = http.client.HTTPConnection(front[0], front[1])
@@ -72,6 +79,7 @@ def get_section(front, session):
     except OSError:
         return None
 
+# Retrieve all commands from queue and put in outbound and resend
 def flush_commands(cmd_queue, outbound_cmds, resend_queue):
     try:
         while True:
@@ -90,6 +98,7 @@ def flush_commands(cmd_queue, outbound_cmds, resend_queue):
 
     return True
 
+# UI for displaying an object
 def display_object(objects, o):
     obj = objects[o]
 
@@ -108,27 +117,30 @@ def display_object(objects, o):
     else:
         print(", moving at speed", obj["speed"])
 
+# UI for displaying map section
 def display_map(section):
     print("You are in", section["name"])
 
     for o in section["objects"]:
         display_object(section["objects"], o)
 
+# Player UDP listener thread
 def player_listener(s, s_lock, cmd_queue):
     global front, front_seq
     session = None
     section = None
-    last_ack = -1
-    last_front_msg = 0
-    outbound_cmds = {}
-    resend_queue = queue.PriorityQueue()
-    recvd_updates = []
-    last_acked_version = -1
+    last_ack = -1 # Last ACK consecutively received
+    last_front_msg = 0 # Last time front spoke to us
+    outbound_cmds = {} # Commands still to be acked by front
+    resend_queue = queue.PriorityQueue() # Resend queue to front
+    recvd_updates = [] # Receive buffer from front
+    last_acked_version = -1 # Last ACK consecutively sent
     current_rtt = settings.PLAYER_INITIAL_RTT
     next_listen_timeout = current_rtt
 
     while True:
         with front_lock:
+            # First get a front if we don't have it
             while not front:
                 if not session:
                     session = login_blackbox()
@@ -145,6 +157,7 @@ def player_listener(s, s_lock, cmd_queue):
                     recv_updates = []
                     section = None
 
+            # Get section if we don't have it
             while not section:
                 section = get_section(front, session)
                 if section:
@@ -152,43 +165,47 @@ def player_listener(s, s_lock, cmd_queue):
                     display_map(section)
         
         try:
+            # Listen for packets
             with s_lock:
                 s.settimeout(next_listen_timeout)
 
             data, addr = s.recvfrom(1024)
 
-            if data == b"FRONT!":
+            if data == b"FRONT!": # We're talking to the wrong front
                 with front_lock:
                     front = None
             else:
                 with front_lock:
-                    if addr != front:
+                    if addr != front: # We received packet from someone we don't know
                         print("Unknown sender", addr)
                         raise Exception
 
                 last_front_msg = time.time()
 
-                if data[:4] == b"PING":
+                if data[:4] == b"PING": # Front keepalive
                     current_rtt, timestamp = struct.unpack("!dd", data[4:])
 
                     with s_lock:
                         try_send(s, b"PONG" + struct.pack("!d", timestamp), addr)
-                elif data[:3] == b"ACK":
+                elif data[:3] == b"ACK": # Front ack
                     seq = struct.unpack_from("!l", data[3:])[0]
 
+                    # Flush commands from queue
                     if not flush_commands(cmd_queue, outbound_cmds, resend_queue):
-                        break
+                        break # Command is to quit
 
+                    # Remove acked command from outbound buffer
                     if seq in outbound_cmds:
                         del outbound_cmds[seq]
                     else:
                         print("Duplicate ACK", seq)
                     
+                    # Calculate last consecutively received ack
                     with front_lock:
                         if seq < front_seq:
                             while last_ack < seq and last_ack not in outbound_cmds:
                                 last_ack += 1
-                elif data[:6] == b"FRONT:":
+                elif data[:6] == b"FRONT:": # Command to change fronts
                     front = pickle.loads(data[6:])
 
                     last_front_msg = time.time()
@@ -198,21 +215,25 @@ def player_listener(s, s_lock, cmd_queue):
                     resend_queue = queue.PriorityQueue()
                     recv_updates = []
                     section = None
-                elif data[:6] == b"UPDATE":
+                elif data[:6] == b"UPDATE": # Update from front
                     version, obj, data = pickle.loads(data[6:])
 
+                    # Add to receive buffer if a new update
                     if version > last_acked_version:
                         if version not in recvd_updates:
                             recvd_updates.append(version)
+                        # Update last consecutive ack counter and clean buffer
                         while last_acked_version + 1 in recvd_updates:
                             recvd_updates.remove(version)
                             last_acked_version += 1
 
-                    with s_lock:
+                    with s_lock: # Acknowledge the update
                         try_send(s, b"ACK" + struct.pack("!l", last_acked_version), addr)
 
+                    # Process the update
                     if obj not in section["objects"] or section["objects"][obj]["version"] < version:
                         if data == None:
+                            # Object is gone
                             print(section["objects"][obj]["name"], "[#" + str(obj) + "] left the section")
                             del section["objects"][obj]
                         else:
@@ -231,10 +252,11 @@ def player_listener(s, s_lock, cmd_queue):
             pass
 
         if not flush_commands(cmd_queue, outbound_cmds, resend_queue):
-            break
+            break # Command was to quit
 
         next_listen_timeout = current_rtt
 
+        # Process resend queue
         try:
             timestamp, seq = resend_queue.get(False)
 
@@ -255,6 +277,7 @@ def player_listener(s, s_lock, cmd_queue):
         except queue.Empty:
             pass
 
+# Class for sending player commands
 class Command_sender:
     def __init__(self, s, s_lock, cmd_queue):
         self.s = s
@@ -278,6 +301,7 @@ class Command_sender:
                 self.cmd_queue.put((front_seq, packet, time.time()))
                 front_seq += 1
 
+# Thread for reading commands from user
 def player_command(s, s_lock, cmd_queue):
     sender = Command_sender(s, s_lock, cmd_queue)
 
@@ -293,17 +317,17 @@ def player_command(s, s_lock, cmd_queue):
         else:
             param = "0"
 
-        if cmd[:1] == "n":
+        if cmd[:1] == "n": # Do nothing
             sender.send(b"NOP")
-        elif cmd[:1] == "s" and int(param) >= 0 and int(param) <= 10:
+        elif cmd[:1] == "s" and int(param) >= 0 and int(param) <= 10: # Change speed
             sender.send(b"SPEED" + struct.pack("!h", int(param)))
-        elif cmd[:1] == "d" and int(param) >= 0 and int(param) <= 360:
+        elif cmd[:1] == "d" and int(param) >= 0 and int(param) <= 360: # Change direction
             sender.send(b"DIR" + struct.pack("!h", int(param)))
-        elif cmd[:1] == "q":
+        elif cmd[:1] == "q": # Quit
             sender.send(b"QUIT")
             print("Bye!")
             break
-        elif cmd[:1] == "?":
+        elif cmd[:1] == "?": # Help
             print(help)
         elif cmd == "":
             continue

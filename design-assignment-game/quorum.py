@@ -1,3 +1,7 @@
+# Quorum knows which fronts are alive and which map sections and players they have
+# Moves map sections in case of front failure
+# Jarkko Kovala <jarkko.kovala@helsinki.fi>
+
 import settings
 
 import sys
@@ -10,18 +14,19 @@ import http.client
 from http.server import BaseHTTPRequestHandler, HTTPServer
 from urllib.parse import urlparse
 
-fronts = settings.INITIAL_FRONTS
+fronts = settings.INITIAL_FRONTS # Dict of fronts we have
 for id in fronts:
     fronts[id]["pingcount"] = 0
     fronts[id]["failed"] = False
 fronts_lock = threading.Lock()
 
-section_neighbors = {}
+section_neighbors = {} # Neighbors for map sections
 section_neighbors_lock = threading.Lock()
 
-players = settings.INITIAL_PLAYERS
+players = settings.INITIAL_PLAYERS # List of all players
 players_lock = threading.Lock()
 
+# Request a front to accept a player connection
 # caller must have fronts_lock and players_lock
 def request_front_for_player(front, player):
     if not front["failed"]:
@@ -43,6 +48,7 @@ def request_front_for_player(front, player):
 
     return False
 
+# Request front to fetch a section
 # Caller must have fronts_lock, players_lock
 def request_front_for_section(front, source, section, neighbors):
     if not fronts[front]["failed"]:
@@ -64,6 +70,7 @@ def request_front_for_section(front, source, section, neighbors):
             pass
     return False
 
+# Update a front's neighbor information
 def update_front_with_neighbors(front, section, neighbors):
     front_conn = http.client.HTTPConnection(fronts[front]["address"][0], fronts[front]["address"][1])
 
@@ -82,6 +89,7 @@ def update_front_with_neighbors(front, section, neighbors):
     
     return False
 
+# Get list of neighbors from an object
 def get_neighbors(obj):
     neighbors = {}
 
@@ -91,6 +99,7 @@ def get_neighbors(obj):
     
     return neighbors
 
+# Find the front of a section
 # Caller must have fronts_lock
 def find_front_for_section(section):
     for front in fronts:
@@ -98,6 +107,7 @@ def find_front_for_section(section):
             return front
     return None
 
+# Find a front id by address and port
 # Caller must have fronts_lock
 def find_front_by_addrport(addrport):
     for front in fronts:
@@ -105,6 +115,7 @@ def find_front_by_addrport(addrport):
             return front
     return None
 
+# Fail a front, move sections elsewhere and update neighbors
 # Caller must have fronts_lock, players_lock
 def fail_front(id):
     print("Front", id, "failed")
@@ -113,6 +124,7 @@ def fail_front(id):
 
     print("Failing front", id, "with sections", fronts[id]["sections"])
 
+    # Try to find an available front
     for front in fronts:
         if front is not id and not fronts[front]["failed"]:
             new_front = front
@@ -123,6 +135,7 @@ def fail_front(id):
         with section_neighbors_lock:
             touched_sections = set()
 
+            # Find sections that are neighbors to any sections in failed front
             for section in fronts[id]["sections"]:
                 if "w-neighbor" in section_neighbors[section]:
                     section_neighbors[section_neighbors[section]["w-neighbor"][1]]["e-neighbor"] = (fronts[id]["address"], section)
@@ -137,6 +150,7 @@ def fail_front(id):
                     section_neighbors[section_neighbors[section]["s-neighbor"][1]]["n-neighbor"] = (fronts[id]["address"], section)
                     touched_sections.add(section_neighbors[section]["s-neighbor"][1])
             
+            # Move all sections in failed front to new
             for section in fronts[id]["sections"]:
                 if not request_front_for_section(new_front, settings.STORE_ADDRPORT, section, section_neighbors[section]):
                     print("Failed moving section")
@@ -147,22 +161,27 @@ def fail_front(id):
                 if section in touched_sections:
                     touched_sections.remove(section)
 
+            # Update neighbors for sections we haven't updated yet
             for section in touched_sections:
                 if not update_front_with_neighbors(find_front_for_section(section), section, section_neighbors[section]):
                     print("Updating neighbors failed.")
                     return
 
+        # Move players to a new front
         for player in players:
             if players[player]["front"] == front:
                 print("Player", player, "to new front")
                 players[player]["front"] = new_front
 
+        # Mark a front failed.
+        # Only do this if failing process finished so we will retry in next iteration
         fronts[id]["sections"] = set()
         fronts[id]["failed"] = True
         print("Front failed.")
     else:
         print("Could not find an available front")
 
+# HTTP request handler for quorum
 class quorum_http_handler(BaseHTTPRequestHandler):
     def do_POST(self):
         protocol_version = "HTTP/1.1"
@@ -172,7 +191,7 @@ class quorum_http_handler(BaseHTTPRequestHandler):
         if content_len > 0:
             body = self.rfile.read(content_len)
 
-        if query.path == "/front":
+        if query.path == "/front": # Request for a front for a player
             client = pickle.loads(body)
 
             with fronts_lock, players_lock:
@@ -191,16 +210,16 @@ class quorum_http_handler(BaseHTTPRequestHandler):
                 else:
                     self.send_error(503)
                     self.end_headers()
-        elif query.path == "/move":
+        elif query.path == "/move": # Request to move player to another front or section
             player, (front, section) = pickle.loads(body)
 
             new_front = find_front_by_addrport(front)
 
             with players_lock:
-                players[player]["front"] = front
+                players[player]["front"] = new_front
                 players[player]["section"] = section
 
-            print("Player", player, "moved to front", front, "section", section)
+            print("Player", player, "moved to front", new_front, "section", section)
 
             self.send_response(200)
             self.end_headers()
@@ -208,6 +227,7 @@ class quorum_http_handler(BaseHTTPRequestHandler):
             self.send_error(404)
             self.end_headers()
 
+# Quorum HTTP server thread
 def quorum_http_server():
     httpd = HTTPServer(settings.QUORUM_ADDRPORT, quorum_http_handler)
 
@@ -219,12 +239,14 @@ def quorum_http_server():
     
     httpd.server_close()
 
+# Thread to send keepalives to fronts
 def front_pinger(s):
     while True:
         with fronts_lock:
             for id in fronts:
                 front = fronts[id]
 
+                # Check for any timeouts
                 if not front["failed"] and front["pingcount"] > 4:
                     with players_lock:
                         fail_front(id)
@@ -234,6 +256,7 @@ def front_pinger(s):
                 front["pingcount"] += 1
         time.sleep(1)
 
+# Thread to listen for keepalives from fronts
 def front_pong_listener(s):
     while True:
         data, addr = s.recvfrom(1024)
@@ -250,6 +273,7 @@ def front_pong_listener(s):
                             print("Front", id, "back alive")
 
 def main():
+    # Get initial front/section info from settings and tell fronts to fetch the data
     for front in settings.INITIAL_SECTIONS_FOR_FRONTS:
         fronts[front]["sections"] = set()
 

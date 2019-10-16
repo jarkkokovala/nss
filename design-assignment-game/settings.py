@@ -1,3 +1,6 @@
+# Global settings used for modules
+# Jarkko Kovala <jarkko.kovala@helsinki.fi>
+
 SECTION_XSIZE = 100
 SECTION_YSIZE = 100
 

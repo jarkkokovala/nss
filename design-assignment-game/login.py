@@ -1,3 +1,6 @@
+# Login module: handles login requests for player
+# Jarkko Kovala <jarkko.kovala@helsinki.fi>
+
 import settings
 
 import sys
@@ -10,6 +13,7 @@ def main():
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.bind(settings.LOGIN_ADDRPORT)
 
+        # Listen for UDP forever
         while True:
             data, addr = s.recvfrom(1024)
 
@@ -24,13 +28,15 @@ def main():
 
                 try:
                     print("Asking for front for", client)
+
+                    # Get front from quorum
                     addrport = settings.QUORUM_ADDRPORT
                     quorum_conn = http.client.HTTPConnection(addrport[0], addrport[1])
                     quorum_conn.request("POST", "/front", pickle.dumps(client))
                     response = quorum_conn.getresponse()
                     quorum_conn.close()
 
-                    if response.status == 200:
+                    if response.status == 200: # If OK, send to player
                         s.sendto(b"FRONT:" + response.read(), addr)
 
                 except OSError:
