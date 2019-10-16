@@ -169,7 +169,7 @@ def fail_front(id):
 
         # Move players to a new front
         for player in players:
-            if players[player]["front"] == front:
+            if players[player]["front"] == id:
                 print("Player", player, "to new front")
                 players[player]["front"] = new_front
 
@@ -177,7 +177,7 @@ def fail_front(id):
         # Only do this if failing process finished so we will retry in next iteration
         fronts[id]["sections"] = set()
         fronts[id]["failed"] = True
-        print("Front failed.")
+        print("Front", id, "failed.")
     else:
         print("Could not find an available front")
 
