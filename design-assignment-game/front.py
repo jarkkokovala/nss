@@ -21,7 +21,7 @@ if len(sys.argv) < 2:
 FRONT = int(sys.argv[1])
 addrport = settings.INITIAL_FRONTS[FRONT]["address"]
 
-sections = settings.INITIAL_SECTIONS_FOR_FRONTS[FRONT]
+sections = {}
 sections_lock = threading.Lock()
 
 players = {}
@@ -481,6 +481,40 @@ class front_http_handler(BaseHTTPRequestHandler):
             
             self.send_response(200)
             self.end_headers()
+        elif query.path == "/map":
+            source, section, neighbors = pickle.loads(body)
+
+            print("Told to retrieve section", section, "from", source)
+
+            with sections_lock, players_lock:
+                conn = http.client.HTTPConnection(source[0], source[1])
+
+                try:
+                    conn.request("GET", "/map?section=" + str(section))
+
+                    response = conn.getresponse()
+                    conn.close()
+
+                    if response.status == 200:
+                        new_section, new_players = pickle.loads(response.read())
+                        for x in ("e-neighbor", "w-neighbor", "n-neighbor", "s-neighbor"):
+                            if x in neighbors:
+                                new_section[x] = neighbors[x]
+                        for player in new_players:
+                            players[player] = new_players[player]
+                            players[player]["pingcount"] = 0
+                            players[player]["rtt"] = settings.PLAYER_INITIAL_RTT
+                            players[player]["last_sent_ack"] = -1
+                            players[player]["recv_buffer"] = {}
+                        sections[section] = new_section
+                        store_section(section)
+
+                        self.send_response(200)
+                    else:
+                        self.send_response(503)
+                except OSError:
+                    self.send_response(503)
+            self.end_headers()
         elif query.path == "/move":
             player, ship = pickle.loads(body)
             id = player["id"]
@@ -527,11 +561,6 @@ def main():
     with s_lock:
         s.bind(addrport)
         s.settimeout(settings.FRONT_TIMEOUT)
-
-    with sections_lock:
-        for section in sections:
-            while not store_section(section):
-                continue
 
     front_http_server_thread = threading.Thread(target=front_http_server)
     front_http_server_thread.start()

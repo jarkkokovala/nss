@@ -16,6 +16,9 @@ for id in fronts:
     fronts[id]["failed"] = False
 fronts_lock = threading.Lock()
 
+section_neighbors = {}
+section_neighbors_lock = threading.Lock()
+
 players = settings.INITIAL_PLAYERS
 players_lock = threading.Lock()
 
@@ -61,7 +64,8 @@ def request_front_for_player(front, player):
 
         front_conn = http.client.HTTPConnection(addrport[0], addrport[1])
         try:
-            print(player)
+            print("Requesting front", addrport, "for player", next(iter(player.values()))["name"])
+
             front_conn.request("POST", "/player", pickle.dumps(player))
 
             response = front_conn.getresponse()
@@ -72,6 +76,27 @@ def request_front_for_player(front, player):
         except OSError:
             pass
 
+    return False
+
+# Caller must have fronts_lock, players_lock
+def request_front_for_section(front, source, section, neighbors):
+    if not fronts[front]["failed"]:
+        addrport = fronts[front]["address"]
+
+        front_conn = http.client.HTTPConnection(addrport[0], addrport[1])
+
+        try:
+            print("Requesting front", addrport, "for section", section)
+
+            front_conn.request("POST", "/map", pickle.dumps((source, section, neighbors)))
+
+            response = front_conn.getresponse()
+            front_conn.close()
+            
+            if response.status == 200:
+                return True
+        except OSError:
+            pass
     return False
 
 class quorum_http_handler(BaseHTTPRequestHandler):
@@ -132,7 +157,26 @@ def quorum_http_server():
     
     httpd.server_close()
 
+def get_neighbors(obj):
+    neighbors = {}
+
+    for n in ("e-neighbor", "w-neighbor", "n-neighbor", "s-neighbor"):
+        if n in obj:
+            neighbors[n] = obj[n]
+    
+    return neighbors
+
 def main():
+    for front in settings.INITIAL_SECTIONS_FOR_FRONTS:
+        for section in settings.INITIAL_SECTIONS_FOR_FRONTS[front]:
+            neighbors = get_neighbors(settings.INITIAL_SECTIONS_FOR_FRONTS[front][section])
+
+            section_neighbors[section] = neighbors
+
+            while not request_front_for_section(front, settings.STORE_ADDRPORT, section, neighbors):
+                time.sleep(1)
+                continue
+
     quorum_http_server_thread = threading.Thread(target=quorum_http_server)
     quorum_http_server_thread.start()
 

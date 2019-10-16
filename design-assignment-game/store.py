@@ -37,9 +37,9 @@ def update_object(section, version, obj_id, obj):
 def clean_section(section):
     section = section.copy()
 
-    del section["recv_buffer"]
-    del section["last_ack"]
-    del section["front"]
+    for x in ("recv_buffer", "last_ack", "front"):
+        if x in section:
+            del section[x]
 
     return section
 
@@ -51,14 +51,15 @@ class store_http_handler(BaseHTTPRequestHandler):
         vars = parse_qs(query.query)
 
         if query.path == "/map":
-            section = vars["section"][0]
+            section = int(vars["section"][0])
 
             with sections_lock:
+                print(section, "requested", list(sections))
                 if section in sections:
                     print("Section", section, "requested, sending")
                     self.send_response(200)
                     self.end_headers()
-                    self.wfile.write(pickle.dumps(clean_section(sections[section])))
+                    self.wfile.write(pickle.dumps((clean_section(sections[section]), {})))
                 else:
                     print("Section", section, "requested but we don't have it")
                     self.send_response(404)
@@ -126,6 +127,12 @@ def store_http_server():
     httpd.server_close()
 
 def main():
+    for front in settings.INITIAL_SECTIONS_FOR_FRONTS:
+        for section in settings.INITIAL_SECTIONS_FOR_FRONTS[front]:
+            print("Adding initial section", section)
+            sections[section] = settings.INITIAL_SECTIONS_FOR_FRONTS[front][section]
+            print(sections[section])
+
     store_http_server_thread = threading.Thread(target=store_http_server)
     store_http_server_thread.start()
 
