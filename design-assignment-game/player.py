@@ -98,12 +98,15 @@ def display_object(objects, o):
     else:
         print("You see \"", end='')
     
-    print(obj["name"] + "\"", "at", obj["loc"], end='')
+    print(obj["name"] + "\" [#" + str(o) + "]", "at", obj["loc"], end='')
+
+    if "direction" in obj:
+        print(", heading", obj["direction"], "deg", end='')
 
     if obj["speed"] == 0:
         print(" (stationary)")
     else:
-        print(" moving at direction", obj["direction"], "with speed", obj["speed"])
+        print(", moving at speed", obj["speed"])
 
 def display_map(section):
     print("You are in", section["name"])
@@ -153,7 +156,6 @@ def player_listener(s, s_lock, cmd_queue):
                 s.settimeout(next_listen_timeout)
 
             data, addr = s.recvfrom(1024)
-            print(data, addr)
 
             if data == b"FRONT!":
                 with front_lock:
@@ -210,11 +212,15 @@ def player_listener(s, s_lock, cmd_queue):
                     with s_lock:
                         try_send(s, b"ACK" + struct.pack("!l", last_acked_version), addr)
 
-                    if obj not in section["objects"][obj] or section["objects"][obj]["version"] < version:
-                        section["objects"][obj] = data
-                        section["objects"][obj]["version"] = version
+                    if obj not in section["objects"] or section["objects"][obj]["version"] < version:
+                        if data == None:
+                            print(section["objects"][obj]["name"], "[#" + str(obj) + "] left the section")
+                            del section["objects"][obj]
+                        else:
+                            section["objects"][obj] = data
+                            section["objects"][obj]["version"] = version
 
-                        display_object(section["objects"], obj)
+                            display_object(section["objects"], obj)
 
         except socket.timeout:
             if time.time() - last_front_msg > settings.FRONT_TIMEOUT:

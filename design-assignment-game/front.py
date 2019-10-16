@@ -265,7 +265,7 @@ def front_listener():
                     player = None
 
                     for p in players:
-                        if players[p]["addr"] == addr:
+                        if players[p]["addr"] == addr and "send_buffer" in players[p]:
                             player = players[p]
                             break
          
@@ -283,7 +283,7 @@ def front_listener():
                                     try_send(s, player["send_buffer"][version + 1], addr)
                             
                             for seq in list(player["send_buffer"]):
-                                if seq < version:
+                                if seq <= version:
                                     del player["send_buffer"][seq]
                             
                             while player["last_recvd_ack"] < cur_version and player["last_recvd_ack"] not in player["send_buffer"]:
@@ -298,8 +298,6 @@ def front_listener():
 
                             with s_lock:
                                 try_send(s, b"ACK" + struct.pack("!l", seq), addr)
-
-                            print(seq, player["last_sent_ack"], player["recv_buffer"])
 
                             if seq > player["last_sent_ack"] and seq not in player["recv_buffer"]:
                                 player["recv_buffer"][seq] = payload
