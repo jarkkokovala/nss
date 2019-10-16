@@ -493,6 +493,7 @@ class front_http_handler(BaseHTTPRequestHandler):
                     conn.request("GET", "/map?section=" + str(section))
 
                     response = conn.getresponse()
+                   
                     conn.close()
 
                     if response.status == 200:
@@ -514,6 +515,16 @@ class front_http_handler(BaseHTTPRequestHandler):
                         self.send_response(503)
                 except OSError:
                     self.send_response(503)
+            self.end_headers()
+        elif query.path == "/neighbors":
+            section, neighbors = pickle.loads(body)
+
+            print("Updating neighbors for section", section, neighbors)
+            with sections_lock:
+                for n in neighbors:
+                    sections[section][n] = neighbors[n]
+            
+            self.send_response(200)
             self.end_headers()
         elif query.path == "/move":
             player, ship = pickle.loads(body)

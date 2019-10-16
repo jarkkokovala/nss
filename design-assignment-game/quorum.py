@@ -22,41 +22,6 @@ section_neighbors_lock = threading.Lock()
 players = settings.INITIAL_PLAYERS
 players_lock = threading.Lock()
 
-# Caller must have fronts_lock
-def fail_front(id):
-    print("Front", id, "failed")
-
-    fronts[id]["failed"] = True
-
-def front_pinger(s):
-    while True:
-        with fronts_lock:
-            for id in fronts:
-                front = fronts[id]
-
-                if not front["failed"] and front["pingcount"] > 4:
-                    fail_front(id)
-
-                s.sendto(b"PING", front["address"])
-
-                front["pingcount"] += 1
-        time.sleep(1)
-
-def front_pong_listener(s):
-    while True:
-        data, addr = s.recvfrom(1024)
-        if data == b"PONG":
-            with fronts_lock:
-                for id in fronts:
-                    front = fronts[id]
-
-                    if front["address"] == addr:
-                        front["pingcount"] = 0
-
-                        if front["failed"]:
-                            front["failed"] = False
-                            print("Front", id, "back alive")
-
 # caller must have fronts_lock and players_lock
 def request_front_for_player(front, player):
     if not front["failed"]:
@@ -99,6 +64,105 @@ def request_front_for_section(front, source, section, neighbors):
             pass
     return False
 
+def update_front_with_neighbors(front, section, neighbors):
+    front_conn = http.client.HTTPConnection(fronts[front]["address"][0], fronts[front]["address"][1])
+
+    try:
+        print("Updating neighbors for section", section, "in front", front)
+
+        front_conn.request("POST", "/neighbors", pickle.dumps((section, neighbors)))
+
+        response = front_conn.getresponse()
+        front_conn.close()
+
+        if response.status == 200:
+            return True
+    except OSError:
+        pass
+    
+    return False
+
+def get_neighbors(obj):
+    neighbors = {}
+
+    for n in ("e-neighbor", "w-neighbor", "n-neighbor", "s-neighbor"):
+        if n in obj:
+            neighbors[n] = obj[n]
+    
+    return neighbors
+
+# Caller must have fronts_lock
+def find_front_for_section(section):
+    for front in fronts:
+        if section in fronts[front]["sections"]:
+            return front
+    return None
+
+# Caller must have fronts_lock
+def find_front_by_addrport(addrport):
+    for front in fronts:
+        if fronts[front]["address"] == addrport:
+            return front
+    return None
+
+# Caller must have fronts_lock, players_lock
+def fail_front(id):
+    print("Front", id, "failed")
+
+    new_front = None
+
+    print("Failing front", id, "with sections", fronts[id]["sections"])
+
+    for front in fronts:
+        if front is not id and not fronts[front]["failed"]:
+            new_front = front
+
+    if new_front:
+        print("New front:", new_front, "for sections", fronts[id]["sections"])
+
+        with section_neighbors_lock:
+            touched_sections = set()
+
+            for section in fronts[id]["sections"]:
+                if "w-neighbor" in section_neighbors[section]:
+                    section_neighbors[section_neighbors[section]["w-neighbor"][1]]["e-neighbor"] = (fronts[id]["address"], section)
+                    touched_sections.add(section_neighbors[section]["w-neighbor"][1])
+                if "e-neighbor" in section_neighbors[section]:
+                    section_neighbors[section_neighbors[section]["e-neighbor"][1]]["w-neighbor"] = (fronts[id]["address"], section)
+                    touched_sections.add(section_neighbors[section]["e-neighbor"][1])
+                if "n-neighbor" in section_neighbors[section]:
+                    section_neighbors[section_neighbors[section]["n-neighbor"][1]]["s-neighbor"] = (fronts[id]["address"], section)
+                    touched_sections.add(section_neighbors[section]["n-neighbor"][1])
+                if "s-neighbor" in section_neighbors[section]:
+                    section_neighbors[section_neighbors[section]["s-neighbor"][1]]["n-neighbor"] = (fronts[id]["address"], section)
+                    touched_sections.add(section_neighbors[section]["s-neighbor"][1])
+            
+            for section in fronts[id]["sections"]:
+                if not request_front_for_section(new_front, settings.STORE_ADDRPORT, section, section_neighbors[section]):
+                    print("Failed moving section")
+                    return
+
+                fronts[new_front]["sections"].add(section)
+
+                if section in touched_sections:
+                    touched_sections.remove(section)
+
+            for section in touched_sections:
+                if not update_front_with_neighbors(find_front_for_section(section), section, section_neighbors[section]):
+                    print("Updating neighbors failed.")
+                    return
+
+        for player in players:
+            if players[player]["front"] == front:
+                print("Player", player, "to new front")
+                players[player]["front"] = new_front
+
+        fronts[id]["sections"] = set()
+        fronts[id]["failed"] = True
+        print("Front failed.")
+    else:
+        print("Could not find an available front")
+
 class quorum_http_handler(BaseHTTPRequestHandler):
     def do_POST(self):
         protocol_version = "HTTP/1.1"
@@ -130,9 +194,7 @@ class quorum_http_handler(BaseHTTPRequestHandler):
         elif query.path == "/move":
             player, (front, section) = pickle.loads(body)
 
-            for f in fronts:
-                if fronts[f]["address"] == front:
-                    new_front = f
+            new_front = find_front_by_addrport(front)
 
             with players_lock:
                 players[player]["front"] = front
@@ -157,21 +219,45 @@ def quorum_http_server():
     
     httpd.server_close()
 
-def get_neighbors(obj):
-    neighbors = {}
+def front_pinger(s):
+    while True:
+        with fronts_lock:
+            for id in fronts:
+                front = fronts[id]
 
-    for n in ("e-neighbor", "w-neighbor", "n-neighbor", "s-neighbor"):
-        if n in obj:
-            neighbors[n] = obj[n]
-    
-    return neighbors
+                if not front["failed"] and front["pingcount"] > 4:
+                    with players_lock:
+                        fail_front(id)
+
+                s.sendto(b"PING", front["address"])
+
+                front["pingcount"] += 1
+        time.sleep(1)
+
+def front_pong_listener(s):
+    while True:
+        data, addr = s.recvfrom(1024)
+        if data == b"PONG":
+            with fronts_lock:
+                for id in fronts:
+                    front = fronts[id]
+
+                    if front["address"] == addr:
+                        front["pingcount"] = 0
+
+                        if front["failed"]:
+                            front["failed"] = False
+                            print("Front", id, "back alive")
 
 def main():
     for front in settings.INITIAL_SECTIONS_FOR_FRONTS:
+        fronts[front]["sections"] = set()
+
         for section in settings.INITIAL_SECTIONS_FOR_FRONTS[front]:
             neighbors = get_neighbors(settings.INITIAL_SECTIONS_FOR_FRONTS[front][section])
 
             section_neighbors[section] = neighbors
+            fronts[front]["sections"].add(section)
 
             while not request_front_for_section(front, settings.STORE_ADDRPORT, section, neighbors):
                 time.sleep(1)

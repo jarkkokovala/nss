@@ -281,7 +281,7 @@ class Command_sender:
 def player_command(s, s_lock, cmd_queue):
     sender = Command_sender(s, s_lock, cmd_queue)
 
-    help = "Commands: s <0-5> - change speed, d <0-360> - change direction, n - nop, q - quit, ? - help"
+    help = "Commands: s <0-10> - change speed, d <0-360> - change direction, n - nop, q - quit, ? - help"
     print(help)
 
     while True:
