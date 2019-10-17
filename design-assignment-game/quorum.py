@@ -57,7 +57,7 @@ def request_front_for_section(front, source, section, neighbors):
         front_conn = http.client.HTTPConnection(addrport[0], addrport[1])
 
         try:
-            print("Requesting front", addrport, "for section", section)
+            print("Requesting front", addrport, "for section", section, "neighbors", neighbors)
 
             front_conn.request("POST", "/map", pickle.dumps((source, section, neighbors)))
 
@@ -75,7 +75,7 @@ def update_front_with_neighbors(front, section, neighbors):
     front_conn = http.client.HTTPConnection(fronts[front]["address"][0], fronts[front]["address"][1])
 
     try:
-        print("Updating neighbors for section", section, "in front", front)
+        print("Updating neighbors for section", section, "in front", front, neighbors)
 
         front_conn.request("POST", "/neighbors", pickle.dumps((section, neighbors)))
 
@@ -138,16 +138,16 @@ def fail_front(id):
             # Find sections that are neighbors to any sections in failed front
             for section in fronts[id]["sections"]:
                 if "w-neighbor" in section_neighbors[section]:
-                    section_neighbors[section_neighbors[section]["w-neighbor"][1]]["e-neighbor"] = (fronts[id]["address"], section)
+                    section_neighbors[section_neighbors[section]["w-neighbor"][1]]["e-neighbor"] = (fronts[new_front]["address"], section)
                     touched_sections.add(section_neighbors[section]["w-neighbor"][1])
                 if "e-neighbor" in section_neighbors[section]:
-                    section_neighbors[section_neighbors[section]["e-neighbor"][1]]["w-neighbor"] = (fronts[id]["address"], section)
+                    section_neighbors[section_neighbors[section]["e-neighbor"][1]]["w-neighbor"] = (fronts[new_front]["address"], section)
                     touched_sections.add(section_neighbors[section]["e-neighbor"][1])
                 if "n-neighbor" in section_neighbors[section]:
-                    section_neighbors[section_neighbors[section]["n-neighbor"][1]]["s-neighbor"] = (fronts[id]["address"], section)
+                    section_neighbors[section_neighbors[section]["n-neighbor"][1]]["s-neighbor"] = (fronts[new_front]["address"], section)
                     touched_sections.add(section_neighbors[section]["n-neighbor"][1])
                 if "s-neighbor" in section_neighbors[section]:
-                    section_neighbors[section_neighbors[section]["s-neighbor"][1]]["n-neighbor"] = (fronts[id]["address"], section)
+                    section_neighbors[section_neighbors[section]["s-neighbor"][1]]["n-neighbor"] = (fronts[new_front]["address"], section)
                     touched_sections.add(section_neighbors[section]["s-neighbor"][1])
             
             # Move all sections in failed front to new
@@ -163,9 +163,14 @@ def fail_front(id):
 
             # Update neighbors for sections we haven't updated yet
             for section in touched_sections:
-                if not update_front_with_neighbors(find_front_for_section(section), section, section_neighbors[section]):
-                    print("Updating neighbors failed.")
-                    return
+                front = find_front_for_section(section)
+
+                if not fronts[front]["pingcount"] > 4: # Don't try to update a failing front
+                    if not update_front_with_neighbors(find_front_for_section(section), section, section_neighbors[section]):
+                        print("Updating neighbors failed.")
+                        return
+                else:
+                    print("Not updating neighbors for section", section, "in failed front", front, "update was:", section_neighbors[section])
 
         # Move players to a new front
         for player in players:

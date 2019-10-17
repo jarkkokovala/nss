@@ -566,7 +566,7 @@ class front_http_handler(BaseHTTPRequestHandler):
             id = player["id"]
             section = player["section"]
 
-            print("Receiving player", id)
+            print("Receiving player", id, "to section", section)
 
             player["pingcount"] = 0
             player["rtt"] = settings.PLAYER_INITIAL_RTT
